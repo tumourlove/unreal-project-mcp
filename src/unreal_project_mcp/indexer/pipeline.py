@@ -125,13 +125,26 @@ class IndexingPipeline:
                     modules.append((sub, sub.name, "GameModule"))
 
         # Plugins/ — each plugin with a Source/ dir is a module
+        # Look inside Source/ for named subdirs (the actual module names),
+        # which avoids using hashed marketplace folder names like "MassProj90e0418169efV2".
         plugins_dir = project_path / "Plugins"
         if plugins_dir.is_dir():
             for plugin_dir in sorted(plugins_dir.iterdir()):
                 if not plugin_dir.is_dir():
                     continue
                 plugin_source = plugin_dir / "Source"
-                if plugin_source.is_dir():
+                if not plugin_source.is_dir():
+                    continue
+                # Discover module subdirs inside Source/ (e.g. Source/MassProjectile/)
+                sub_modules = [
+                    d for d in sorted(plugin_source.iterdir())
+                    if d.is_dir() and not d.name.startswith(".")
+                ]
+                if sub_modules:
+                    for sub in sub_modules:
+                        modules.append((sub, sub.name, "Plugin"))
+                else:
+                    # Flat layout — .h/.cpp directly in Source/
                     modules.append((plugin_source, plugin_dir.name, "Plugin"))
 
         # If project_path itself contains .h/.cpp files (test fixture case),
@@ -202,7 +215,21 @@ class IndexingPipeline:
                 if not plugin_dir.is_dir():
                     continue
                 plugin_source = plugin_dir / "Source"
-                if plugin_source.is_dir():
+                if not plugin_source.is_dir():
+                    continue
+                # Use module subdirs for naming (avoids hashed marketplace folder names)
+                sub_modules = [
+                    d for d in sorted(plugin_source.iterdir())
+                    if d.is_dir() and not d.name.startswith(".")
+                ]
+                if sub_modules:
+                    for sub in sub_modules:
+                        for dirpath, _, filenames in os.walk(sub):
+                            for fname in filenames:
+                                fpath = Path(dirpath) / fname
+                                if fpath.suffix.lower() in _CPP_EXTENSIONS:
+                                    cpp_files.append((fpath, sub.name, "Plugin"))
+                else:
                     for dirpath, _, filenames in os.walk(plugin_source):
                         for fname in filenames:
                             fpath = Path(dirpath) / fname
