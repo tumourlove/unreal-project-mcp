@@ -10,9 +10,10 @@ AI assistants are great at writing code but struggle to *understand* large codeb
 
 **Complements** (does not replace):
 - [unreal-source-mcp](https://github.com/tumourlove/unreal-source-mcp) — Engine-level source intelligence (full UE C++ and HLSL)
+- [unreal-editor-mcp](https://github.com/tumourlove/unreal-editor-mcp) — Build diagnostics and editor log tools (Live Coding, error parsing, log search)
 - [unreal-api-mcp](https://github.com/nicobailon/unreal-api-mcp) by [Nico Bailon](https://github.com/nicobailon) — API surface lookup (signatures, #include paths, deprecation warnings)
 
-Together these three servers give AI agents full-stack UE understanding: engine internals, API surface, and your project code.
+Together these servers give AI agents full-stack UE understanding: engine internals, API surface, your project code, and build/runtime feedback.
 
 ## Quick Start
 
