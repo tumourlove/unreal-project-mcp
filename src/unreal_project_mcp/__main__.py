@@ -26,16 +26,22 @@ def cli() -> None:
         "--reindex", action="store_true",
         help="Delete existing DB and re-index from scratch.",
     )
+    parser.add_argument(
+        "--reindex-changed", action="store_true",
+        help="Incrementally re-index only files that changed since last index.",
+    )
     args = parser.parse_args()
 
-    if args.index or args.reindex:
+    if args.reindex_changed:
+        _run_reindex_changed()
+    elif args.index or args.reindex:
         _run_index(reindex=args.reindex)
     else:
         _run_server()
 
 
 def _run_index(*, reindex: bool = False) -> None:
-    from unreal_project_mcp.config import get_db_path, UE_PROJECT_PATH
+    from unreal_project_mcp.config import get_db_path, UE_PROJECT_PATH, _detect_project_name
     from unreal_project_mcp.db.schema import init_db
     from unreal_project_mcp.indexer.pipeline import IndexingPipeline
 
@@ -47,6 +53,8 @@ def _run_index(*, reindex: bool = False) -> None:
     if not project_path.is_dir():
         print(f"Error: UE_PROJECT_PATH does not exist: {project_path}", file=sys.stderr)
         sys.exit(1)
+
+    print(f"Detected project: {_detect_project_name()}", file=sys.stderr)
 
     db_path = get_db_path()
 
@@ -89,6 +97,61 @@ def _run_index(*, reindex: bool = False) -> None:
 
     print(
         f"Done. {stats['files_processed']} files, "
+        f"{stats['symbols_extracted']} symbols, "
+        f"{stats['errors']} errors.",
+        file=sys.stderr,
+    )
+    print(f"Database: {db_path}", file=sys.stderr)
+
+
+def _run_reindex_changed() -> None:
+    from unreal_project_mcp.config import get_db_path, UE_PROJECT_PATH, _detect_project_name
+    from unreal_project_mcp.indexer.pipeline import IndexingPipeline
+
+    if not UE_PROJECT_PATH:
+        print("Error: UE_PROJECT_PATH environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+
+    project_path = Path(UE_PROJECT_PATH)
+    if not project_path.is_dir():
+        print(f"Error: UE_PROJECT_PATH does not exist: {project_path}", file=sys.stderr)
+        sys.exit(1)
+
+    db_path = get_db_path()
+    if not db_path.exists():
+        print(f"Error: Database does not exist: {db_path}", file=sys.stderr)
+        print("Run --index first to create the initial index.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Detected project: {_detect_project_name()}", file=sys.stderr)
+    print(f"Incremental reindex from {project_path}...", file=sys.stderr)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    pipeline = IndexingPipeline(conn)
+
+    def _progress(
+        module: str, done: int, total: int, files: int, symbols: int,
+    ) -> None:
+        bar_width = 30
+        frac = done / total if total else 1
+        filled = int(bar_width * frac)
+        bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
+        pct = int(frac * 100)
+        print(
+            f"\r  {bar} {pct:3d}% ({done}/{total}) {files} files, {symbols} syms | {module:<40}",
+            end="", flush=True, file=sys.stderr,
+        )
+
+    stats = pipeline.reindex_changed(project_path, on_progress=_progress)
+    print(file=sys.stderr)  # newline after progress bar
+
+    conn.close()
+
+    print(
+        f"Done. {stats['files_processed']} files processed, "
+        f"{stats['files_skipped']} files skipped, "
         f"{stats['symbols_extracted']} symbols, "
         f"{stats['errors']} errors.",
         file=sys.stderr,
