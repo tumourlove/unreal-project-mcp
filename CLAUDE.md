@@ -31,32 +31,29 @@ unreal-project-mcp/
 ├── pyproject.toml              # Package config, dependencies, entry point
 ├── CLAUDE.md                   # This file
 ├── README.md                   # User-facing docs
-├── LICENSE                     # MIT
+├── .gitignore
 ├── src/
 │   └── unreal_project_mcp/
 │       ├── __init__.py         # Version
 │       ├── __main__.py         # Entry point (uvx runs this)
-│       ├── server.py           # MCP server + tool registration
+│       ├── config.py           # Env vars, DB path, project name detection
+│       ├── server.py           # MCP server + all 7 tool handlers
 │       ├── indexer/
 │       │   ├── __init__.py
 │       │   ├── pipeline.py     # Orchestrates full indexing run
-│       │   ├── cpp_parser.py   # tree-sitter C++ symbol/reference extraction
-│       │   ├── ue_macros.py    # UCLASS/UFUNCTION/UPROPERTY macro handling
-│       │   └── reference_builder.py  # Cross-reference extraction
-│       ├── db/
-│       │   ├── __init__.py
-│       │   ├── schema.py       # SQLite table definitions + migrations
-│       │   └── queries.py      # All SQL queries (no inline SQL elsewhere)
-│       └── tools/
+│       │   ├── cpp_parser.py   # tree-sitter C++ symbol/reference extraction + UE macro handling
+│       │   └── reference_builder.py  # Cross-reference extraction (calls, types)
+│       └── db/
 │           ├── __init__.py
-│           ├── read_source.py
-│           ├── find_references.py
-│           ├── search_source.py
-│           ├── class_hierarchy.py
-│           └── module_info.py
+│           ├── schema.py       # SQLite table definitions + FTS5 + triggers
+│           └── queries.py      # All SQL queries (no inline SQL elsewhere)
 └── tests/
+    ├── test_config.py
     ├── test_cpp_parser.py
-    ├── test_queries.py
+    ├── test_db.py
+    ├── test_pipeline.py
+    ├── test_server.py
+    ├── test_e2e.py
     └── fixtures/
         └── sample_project_source/   # Small UE-like .h/.cpp files for testing
 ```
