@@ -10,6 +10,7 @@ Forked from **unreal-source-mcp v0.1.1** (engine-level indexing). This variant f
 
 **Complements** (does not replace):
 - `unreal-source-mcp` — Engine-level source intelligence (full engine C++ and HLSL)
+- `unreal-config-mcp` — Config/INI intelligence (inheritance chains, settings search, diff from defaults, CVars)
 - `unreal-api-mcp` — API surface (signatures, includes, deprecation)
 - `Agent Integration Kit` — Editor control (Blueprints, assets, Python execution)
 
