@@ -1,4 +1,4 @@
-"""MCP server with 7 tools for Unreal project source intelligence."""
+"""MCP server with 17 tools for Unreal project source intelligence."""
 
 from __future__ import annotations
 

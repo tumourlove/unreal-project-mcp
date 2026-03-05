@@ -1,7 +1,7 @@
 [project]
 name = "unreal-project-mcp"
-version = "0.1.0"
-description = "Project-level C++ source intelligence for Unreal Engine AI development via MCP"
+version = "0.2.0"
+description = "Project-level source and configuration intelligence for Unreal Engine AI development via MCP"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
