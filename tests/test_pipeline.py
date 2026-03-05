@@ -99,3 +99,18 @@ class TestIncrementalReindex:
             "SELECT * FROM symbols WHERE name = 'ANewActor'"
         ).fetchone()
         assert row is not None
+
+
+class TestAssetAndLogExtraction:
+    def test_extracts_asset_references(self, indexed_db):
+        db, _ = indexed_db
+        rows = db.execute("SELECT * FROM asset_references").fetchall()
+        paths = {dict(r)["asset_path"] for r in rows}
+        # At least one of the fixture's asset paths should be found
+        assert any("/Game/" in p for p in paths), f"No /Game/ asset paths found. Got: {paths}"
+
+    def test_extracts_log_categories(self, indexed_db):
+        db, _ = indexed_db
+        rows = db.execute("SELECT * FROM log_categories").fetchall()
+        names = {dict(r)["name"] for r in rows}
+        assert "LogAssetLoader" in names

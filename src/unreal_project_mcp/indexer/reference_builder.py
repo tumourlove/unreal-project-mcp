@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import logging
+import re as _re
 import sqlite3
 from pathlib import Path
 
 from tree_sitter import Node, Parser
 
 from unreal_project_mcp.indexer.cpp_parser import CPP_LANGUAGE
-from unreal_project_mcp.db.queries import insert_reference
+from unreal_project_mcp.db.queries import insert_reference, insert_asset_reference, insert_log_category
 
 logger = logging.getLogger(__name__)
+
+# Asset path regexes (ordered from most specific to most general)
+_CONSTRUCTOR_HELPER_RE = _re.compile(r'ConstructorHelpers::F\w+<[^>]+>\s*\w+\s*\(\s*TEXT\(\s*"(/[^"]+)"')
+_LOAD_OBJECT_RE = _re.compile(r'LoadObject<[^>]+>\s*\([^,]*,\s*TEXT\(\s*"(/[^"]+)"')
+_SOFT_PATH_RE = _re.compile(r'FSoftObjectPath\s*\(\s*TEXT\(\s*"(/[^"]+)"')
+_ASSET_PATH_RE = _re.compile(r'TEXT\(\s*"(/(?:Game|Script|Engine)/[^"]+)"\s*\)')
+
+# Log category regexes
+_LOG_DECL_RE = _re.compile(r'DECLARE_LOG_CATEGORY_EXTERN\s*\(\s*(\w+)\s*,\s*(\w+)')
+_LOG_DEF_RE = _re.compile(r'DEFINE_LOG_CATEGORY\s*\(\s*(\w+)')
 
 
 class ReferenceBuilder:
@@ -68,6 +79,9 @@ class ReferenceBuilder:
             # Type references within functions
             count += self._extract_type_references(func_node, caller_id, file_id)
 
+            # Asset path references within functions
+            self._extract_asset_references(source_bytes, func_node, caller_id, file_id)
+
         # Class-scope references (base classes, member types)
         count += self._extract_class_scope_references(tree.root_node, file_id)
 
@@ -75,6 +89,9 @@ class ReferenceBuilder:
         count += self._extract_global_scope_references(
             tree.root_node, file_id, func_nodes
         )
+
+        # Log category declarations (full file scan)
+        self._extract_log_categories(source_bytes.decode(errors="replace"), file_id)
 
         return count
 
@@ -222,6 +239,78 @@ class ReferenceBuilder:
                 count += 1
 
         return count
+
+    def _extract_asset_references(
+        self, source_bytes: bytes, func_node: Node, caller_id: int | None, file_id: int,
+    ) -> None:
+        """Extract asset path strings from a function body using regex patterns."""
+        body_text = func_node.text.decode(errors="replace")
+        matched_paths: set[str] = set()
+
+        # Specific patterns first (with ref_type tags)
+        specific_patterns = [
+            (_CONSTRUCTOR_HELPER_RE, "constructor_helper"),
+            (_LOAD_OBJECT_RE, "load_object"),
+            (_SOFT_PATH_RE, "soft_path"),
+        ]
+
+        for regex, ref_type in specific_patterns:
+            for m in regex.finditer(body_text):
+                asset_path = m.group(1)
+                matched_paths.add(asset_path)
+                # Compute line number from func_node start
+                text_before = body_text[:m.start()]
+                line = func_node.start_point[0] + 1 + text_before.count("\n")
+                insert_asset_reference(
+                    self._conn,
+                    symbol_id=caller_id,
+                    asset_path=asset_path,
+                    ref_type=ref_type,
+                    file_id=file_id,
+                    line=line,
+                )
+
+        # General fallback for unmatched paths
+        for m in _ASSET_PATH_RE.finditer(body_text):
+            asset_path = m.group(1)
+            if asset_path not in matched_paths:
+                matched_paths.add(asset_path)
+                text_before = body_text[:m.start()]
+                line = func_node.start_point[0] + 1 + text_before.count("\n")
+                insert_asset_reference(
+                    self._conn,
+                    symbol_id=caller_id,
+                    asset_path=asset_path,
+                    ref_type="text_path",
+                    file_id=file_id,
+                    line=line,
+                )
+
+    def _extract_log_categories(self, source_text: str, file_id: int) -> None:
+        """Extract log category declarations/definitions from full file text."""
+        for m in _LOG_DECL_RE.finditer(source_text):
+            name = m.group(1)
+            verbosity = m.group(2)
+            text_before = source_text[:m.start()]
+            line = 1 + text_before.count("\n")
+            insert_log_category(
+                self._conn,
+                name=name,
+                file_id=file_id,
+                line=line,
+                verbosity=verbosity,
+            )
+
+        for m in _LOG_DEF_RE.finditer(source_text):
+            name = m.group(1)
+            text_before = source_text[:m.start()]
+            line = 1 + text_before.count("\n")
+            insert_log_category(
+                self._conn,
+                name=name,
+                file_id=file_id,
+                line=line,
+            )
 
     def _find_nodes(self, node: Node, type_name: str) -> list[Node]:
         """Iteratively find all descendant nodes of a given type."""
