@@ -13,6 +13,10 @@ from unreal_project_mcp.config import get_db_path, UE_PROJECT_PATH, _project_roo
 from unreal_project_mcp.db.schema import init_db
 from unreal_project_mcp.db.queries import (
     find_file_by_suffix,
+    get_asset_references_by_path,
+    get_asset_references_by_symbol,
+    get_config_by_key,
+    get_data_tables_by_struct,
     get_file_by_id,
     get_file_by_path,
     get_inheritance_children,
@@ -23,6 +27,7 @@ from unreal_project_mcp.db.queries import (
     get_source_chunks,
     get_symbols_by_name,
     get_symbols_in_module,
+    search_config_fts,
     search_source_fts,
     search_source_fts_filtered,
     search_symbols_fts,
@@ -627,6 +632,122 @@ def get_project_module_info(module_name: str) -> str:
         lines.append("Key classes:")
         for sym in key_symbols:
             lines.append(f"  {sym['name']} (line {sym['line_start']})")
+
+    return "\n".join(lines)
+
+
+# ── Tool 8: get_config_values ────────────────────────────────────────────
+
+@mcp.tool()
+def get_config_values(key: str, section: str = "") -> str:
+    """Look up config/INI values by key name, with optional section filter. Cross-references with UPROPERTY(Config) C++ symbols."""
+    conn = _get_conn()
+    results = get_config_by_key(conn, key, section=section or None)
+    if not results:
+        return f"No config entries found for key '{key}'."
+    lines = []
+    for r in results:
+        lines.append(f"[{r['section']}] {r['key']} = {r['value']}")
+        lines.append(f"  {_short_path(r['file_path'])}:{r['line']}")
+    # Cross-reference: look for matching C++ UPROPERTY(Config) symbols
+    sym_results = get_symbols_by_name(conn, key)
+    config_syms = [s for s in sym_results if s.get("is_ue_macro")]
+    if config_syms:
+        lines.append("\nC++ declaration:")
+        for s in config_syms:
+            fp = _get_file_path(conn, s["file_id"])
+            lines.append(f"  {s.get('signature', s['name'])} ({_short_path(fp)}:{s['line_start']})")
+    return "\n".join(lines)
+
+
+# ── Tool 9: search_config ───────────────────────────────────────────────
+
+@mcp.tool()
+def search_config(query: str, limit: int = 20) -> str:
+    """Full-text search across all project config/INI files (sections, keys, and values)."""
+    conn = _get_conn()
+    results = search_config_fts(conn, query, limit=limit)
+    if not results:
+        return f"No config entries found for '{query}'."
+    lines = []
+    for r in results:
+        lines.append(f"[{r['section']}] {r['key']} = {r['value']}")
+        lines.append(f"  {_short_path(r['file_path'])}:{r['line']}")
+    return "\n".join(lines)
+
+
+# ── Tool 10: find_asset_references ───────────────────────────────────────
+
+@mcp.tool()
+def find_asset_references(asset_path: str = "", symbol: str = "") -> str:
+    """Find C++ code that references assets by path, or find all asset paths referenced by a symbol."""
+    conn = _get_conn()
+    if not asset_path and not symbol:
+        return "Provide either asset_path or symbol parameter."
+
+    lines = []
+    if asset_path:
+        results = get_asset_references_by_path(conn, asset_path)
+        if not results:
+            return f"No C++ references found for asset path '{asset_path}'."
+        lines.append(f"=== C++ references to '{asset_path}' ===")
+        for r in results:
+            sym_name = r.get("qualified_name") or r.get("symbol_name") or "<unknown>"
+            path = r.get("path") or "<unknown>"
+            lines.append(f"  [{r['ref_type']}] {sym_name} — {_short_path(path)}:{r['line']}")
+
+    if symbol:
+        syms = get_symbols_by_name(conn, symbol)
+        if not syms:
+            syms = search_symbols_fts(conn, symbol, limit=5)
+        if not syms:
+            return f"No symbol found matching '{symbol}'."
+        for s in syms:
+            refs = get_asset_references_by_symbol(conn, s["id"])
+            if refs:
+                lines.append(f"\n=== Assets referenced by {s['qualified_name']} ===")
+                for r in refs:
+                    path = r.get("path") or "<unknown>"
+                    lines.append(f"  [{r['ref_type']}] {r['asset_path']} — {_short_path(path)}:{r['line']}")
+
+    return "\n".join(lines) if lines else "No asset references found."
+
+
+# ── Tool 11: find_data_table_schema ──────────────────────────────────────
+
+@mcp.tool()
+def find_data_table_schema(name: str) -> str:
+    """Show the FTableRowBase struct definition and linked data table for a data table schema."""
+    conn = _get_conn()
+    # Find the struct
+    syms = get_symbols_by_name(conn, name, kind="struct")
+    if not syms:
+        syms = search_symbols_fts(conn, name, limit=5)
+        syms = [s for s in syms if s["kind"] == "struct"]
+    if not syms:
+        return f"No struct found matching '{name}'."
+
+    sym = syms[0]
+    filepath = _get_file_path(conn, sym["file_id"])
+    lines = [f"Struct: {sym['qualified_name']} ({_short_path(filepath)}:{sym['line_start']})"]
+
+    if sym.get("signature"):
+        lines.append(f"Signature: {sym['signature']}")
+
+    # Show data table linkage
+    dt_rows = get_data_tables_by_struct(conn, sym["id"])
+    if dt_rows:
+        lines.append("\nLinked data tables:")
+        for dt in dt_rows:
+            if dt.get("table_path"):
+                lines.append(f"  {dt['table_name']} — {dt['table_path']}")
+            else:
+                lines.append(f"  {dt['table_name']}")
+
+    # Show struct members
+    source = _read_file_lines(filepath, sym["line_start"], sym["line_end"])
+    lines.append(f"\n--- Source ({sym['line_start']}-{sym['line_end']}) ---")
+    lines.append(source)
 
     return "\n".join(lines)
 
