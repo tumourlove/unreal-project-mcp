@@ -59,6 +59,7 @@ class IndexingPipeline:
         self._symbol_spans: dict[str, tuple[int, int]] = {}  # name → (line_start, line_end)
         self._class_name_to_id: dict[str, int] = {}  # class/struct only — for inheritance
         self._class_spans: dict[str, tuple[int, int]] = {}  # class name → (line_start, line_end)
+        self._project_root: Path | None = None
         conn.commit()
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -358,6 +359,17 @@ class IndexingPipeline:
                 ref_builder.extract_references(fpath, row[0])
             except Exception:
                 logger.warning("Error extracting refs from %s", fpath, exc_info=True)
+        self._conn.commit()
+
+        # Phase 4: Post-index passes (tags + patterns)
+        from unreal_project_mcp.indexer.tag_scanner import TagScanner
+        tag_scanner = TagScanner(self._conn)
+        content_dir = self._project_root / "Content" if self._project_root else None
+        tag_scanner.scan_all(content_dir=content_dir)
+
+        from unreal_project_mcp.indexer.pattern_tagger import PatternTagger
+        PatternTagger(self._conn).tag_all()
+
         self._conn.commit()
 
     # ── Private helpers ─────────────────────────────────────────────────
