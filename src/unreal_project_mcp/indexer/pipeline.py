@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from unreal_project_mcp.db.queries import (
     get_file_by_path,
+    get_module_by_name,
     insert_file,
     insert_include,
     insert_inheritance,
@@ -27,6 +28,22 @@ _EXT_TO_FILETYPE = {
     ".cpp": "source",
     ".inl": "inline",
 }
+
+
+def _find_project_root(project_path: Path) -> Path:
+    """Determine the UE project root from *project_path*.
+
+    Handles common layouts:
+    - project_path IS the root (has .uproject or Source/ subdir)
+    - project_path is the Source/ directory itself
+    """
+    if project_path.name == "Source":
+        return project_path.parent
+    if any(project_path.glob("*.uproject")):
+        return project_path
+    if (project_path / "Source").is_dir():
+        return project_path
+    return project_path
 
 
 class IndexingPipeline:
@@ -177,6 +194,39 @@ class IndexingPipeline:
         if on_progress:
             on_progress("Finalizing (inheritance + references)...", total_modules, total_modules, total_files, total_symbols)
         self._finalize()
+
+        # Phase 2: Non-C++ indexing
+        project_root = _find_project_root(project_path)
+        self._project_root = project_root
+
+        # Config/INI
+        config_dir = project_root / "Config"
+        if config_dir.is_dir():
+            from unreal_project_mcp.indexer.config_parser import ConfigParser
+            ConfigParser(self._conn).index_config_dir(config_dir)
+
+        # Build.cs dependencies
+        from unreal_project_mcp.indexer.build_cs_parser import BuildCsParser
+        build_parser = BuildCsParser(self._conn)
+        for mod_path, mod_name, mod_type in modules:
+            # Build.cs is typically inside the module dir
+            for build_cs in mod_path.glob("*.Build.cs"):
+                mod = get_module_by_name(self._conn, mod_name)
+                if mod:
+                    build_parser.parse_build_cs(build_cs, mod["id"])
+            # Also check parent (Source/ModuleName.Build.cs)
+            for build_cs in mod_path.parent.glob(f"{mod_name}.Build.cs"):
+                mod = get_module_by_name(self._conn, mod_name)
+                if mod:
+                    build_parser.parse_build_cs(build_cs, mod["id"])
+
+        # Plugins
+        plugins_dir = project_root / "Plugins"
+        if plugins_dir.is_dir():
+            from unreal_project_mcp.indexer.plugin_parser import PluginParser
+            PluginParser(self._conn).index_plugins_dir(plugins_dir)
+
+        self._conn.commit()
 
         return {
             "files_processed": total_files,

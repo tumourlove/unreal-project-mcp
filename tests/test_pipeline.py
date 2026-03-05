@@ -101,6 +101,58 @@ class TestIncrementalReindex:
         assert row is not None
 
 
+class TestExpandedPipeline:
+    def test_indexes_config_files(self, db, tmp_path):
+        root = tmp_path / "MyGame"
+        root.mkdir()
+        (root / "MyGame.uproject").write_text("{}")
+        src = root / "Source" / "MyGame"
+        src.mkdir(parents=True)
+        (src / "Test.h").write_text("#pragma once\nclass ATestActor {};\n")
+        cfg = root / "Config"
+        cfg.mkdir()
+        (cfg / "DefaultEngine.ini").write_text("[/Script/Engine]\nbUseFixed=True\n")
+
+        pipeline = IndexingPipeline(db)
+        pipeline.index_project(root)
+        rows = db.execute("SELECT COUNT(*) FROM config_entries").fetchone()
+        assert rows[0] >= 1
+
+    def test_indexes_build_cs(self, db, tmp_path):
+        root = tmp_path / "MyGame"
+        root.mkdir()
+        (root / "MyGame.uproject").write_text("{}")
+        src = root / "Source" / "MyGame"
+        src.mkdir(parents=True)
+        (src / "Test.h").write_text("#pragma once\nclass ATestActor {};\n")
+        (src / "MyGame.Build.cs").write_text(
+            'PublicDependencyModuleNames.AddRange(new string[] { "Core", "Engine" });'
+        )
+
+        pipeline = IndexingPipeline(db)
+        pipeline.index_project(root)
+        rows = db.execute("SELECT COUNT(*) FROM module_dependencies").fetchone()
+        assert rows[0] >= 2
+
+    def test_indexes_plugins(self, db, tmp_path):
+        root = tmp_path / "MyGame"
+        root.mkdir()
+        (root / "MyGame.uproject").write_text("{}")
+        src = root / "Source" / "MyGame"
+        src.mkdir(parents=True)
+        (src / "Test.h").write_text("#pragma once\nclass ATestActor {};\n")
+        plugins = root / "Plugins" / "TestPlugin"
+        plugins.mkdir(parents=True)
+        (plugins / "TestPlugin.uplugin").write_text(
+            '{"Modules": [{"Name": "TestPlugin", "Type": "Runtime"}]}'
+        )
+
+        pipeline = IndexingPipeline(db)
+        pipeline.index_project(root)
+        rows = db.execute("SELECT COUNT(*) FROM plugins").fetchone()
+        assert rows[0] >= 1
+
+
 class TestAssetAndLogExtraction:
     def test_extracts_asset_references(self, indexed_db):
         db, _ = indexed_db
