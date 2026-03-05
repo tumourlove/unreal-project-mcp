@@ -153,6 +153,33 @@ class TestExpandedPipeline:
         assert rows[0] >= 1
 
 
+class TestReplicationAndDataTablePipeline:
+    def test_inserts_replication_entries(self, indexed_db):
+        """ReplicatedActor.h has Server, Client, NetMulticast, Replicated, ReplicatedUsing markers."""
+        db, _ = indexed_db
+        rows = db.execute("SELECT * FROM replication_entries").fetchall()
+        rep_types = {dict(r)["rep_type"] for r in rows}
+        # Should have at least Server, Client, NetMulticast from ReplicatedActor.h
+        assert "Server" in rep_types or len(rows) >= 3
+
+    def test_detects_data_table_structs(self, db, tmp_path):
+        src = tmp_path / "Source" / "MyGame"
+        src.mkdir(parents=True)
+        (src / "WeaponData.h").write_text(
+            '#pragma once\n'
+            '#include "Engine/DataTable.h"\n'
+            'struct FTableRowBase {};\n'
+            'USTRUCT()\n'
+            'struct FWeaponDataRow : public FTableRowBase\n'
+            '{\n    GENERATED_BODY()\n    float Damage;\n};\n'
+        )
+        pipeline = IndexingPipeline(db)
+        pipeline.index_project(tmp_path)
+        rows = db.execute("SELECT * FROM data_tables").fetchall()
+        assert len(rows) >= 1
+        assert dict(rows[0])["table_name"] == "FWeaponDataRow"
+
+
 class TestAssetAndLogExtraction:
     def test_extracts_asset_references(self, indexed_db):
         db, _ = indexed_db

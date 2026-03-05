@@ -11,10 +11,12 @@ from typing import Any, Callable
 from unreal_project_mcp.db.queries import (
     get_file_by_path,
     get_module_by_name,
+    insert_data_table,
     insert_file,
     insert_include,
     insert_inheritance,
     insert_module,
+    insert_replication_entry,
     insert_symbol,
 )
 from unreal_project_mcp.indexer.cpp_parser import CppParser
@@ -23,6 +25,7 @@ from unreal_project_mcp.indexer.reference_builder import ReferenceBuilder
 logger = logging.getLogger(__name__)
 
 _CPP_EXTENSIONS = {".h", ".cpp", ".inl"}
+_REP_TYPES = {"Server", "Client", "NetMulticast", "Replicated", "ReplicatedUsing"}
 _EXT_TO_FILETYPE = {
     ".h": "header",
     ".cpp": "source",
@@ -334,6 +337,16 @@ class IndexingPipeline:
         self._resolve_inheritance()
         self._conn.commit()
 
+        # Detect data table structs (inheriting from FTableRowBase)
+        dt_rows = self._conn.execute(
+            "SELECT s.id, s.name FROM symbols s "
+            "JOIN inheritance i ON i.child_id = s.id "
+            "JOIN symbols p ON p.id = i.parent_id "
+            "WHERE p.name = 'FTableRowBase' AND s.kind = 'struct'"
+        ).fetchall()
+        for row in dt_rows:
+            insert_data_table(self._conn, struct_symbol_id=row[0], table_name=row[1])
+
         # Extract cross-references from all indexed C++ files
         ref_builder = ReferenceBuilder(self._conn, self._symbol_name_to_id)
         rows = self._conn.execute(
@@ -409,6 +422,16 @@ class IndexingPipeline:
                 docstring=sym.docstring or None,
                 is_ue_macro=1 if sym.is_ue_macro else 0,
             )
+
+            # Insert replication entries for symbols with replication specifiers
+            for spec in sym.ue_specifiers:
+                if spec in _REP_TYPES:
+                    insert_replication_entry(
+                        self._conn,
+                        symbol_id=sym_id,
+                        rep_type=spec,
+                        callback=sym.rep_notify_func if spec == "ReplicatedUsing" else None,
+                    )
 
             # Track all symbols for reference resolution — prefer definitions
             # over forward declarations (multi-line span = real definition)
