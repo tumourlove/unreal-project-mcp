@@ -16,6 +16,42 @@ CPP_LANGUAGE = Language(tscpp.language())
 
 UE_MACROS = {"UCLASS", "USTRUCT", "UENUM", "UFUNCTION", "UPROPERTY", "UINTERFACE"}
 
+# Replication-related specifiers we extract from UFUNCTION/UPROPERTY args
+_REPLICATION_KEYWORDS = {
+    "Server", "Client", "NetMulticast",
+    "Reliable", "Unreliable",
+    "Replicated", "ReplicatedUsing", "NotReplicated",
+}
+
+
+def _parse_ue_specifiers(macro_name: str, args_text: str) -> tuple[list[str], str | None]:
+    """Parse UE macro arguments for replication specifiers.
+
+    Returns (specifiers_list, rep_notify_func).
+    """
+    specifiers: list[str] = []
+    rep_notify_func: str | None = None
+
+    if not args_text:
+        return specifiers, rep_notify_func
+
+    # Split by comma, handle key=value pairs
+    for token in args_text.split(","):
+        token = token.strip()
+        if "=" in token:
+            key, _, value = token.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if key in _REPLICATION_KEYWORDS:
+                specifiers.append(key)
+                if key == "ReplicatedUsing":
+                    rep_notify_func = value
+        else:
+            if token in _REPLICATION_KEYWORDS:
+                specifiers.append(token)
+
+    return specifiers, rep_notify_func
+
 
 @dataclass
 class ParsedSymbol:
@@ -31,6 +67,8 @@ class ParsedSymbol:
     is_ue_macro: bool = False
     base_classes: list[str] = field(default_factory=list)
     parent_class: str | None = None
+    ue_specifiers: list[str] = field(default_factory=list)
+    rep_notify_func: str | None = None
 
 
 @dataclass
@@ -168,9 +206,10 @@ class CppParser:
     # UE macro detection
     # ------------------------------------------------------------------
 
-    def _try_get_ue_macro(self, node) -> str | None:
+    def _try_get_ue_macro(self, node) -> tuple[str, str] | None:
         """If this node is a UE macro call (expression_statement wrapping
-        a call_expression like UCLASS(...)), return the macro name."""
+        a call_expression like UCLASS(...)), return (macro_name, args_text).
+        args_text is the content between the parentheses."""
         if node.type == "expression_statement":
             for child in node.children:
                 if child.type == "call_expression":
@@ -180,15 +219,38 @@ class CppParser:
                     if fn and fn.type == "identifier":
                         name = fn.text.decode()
                         if name in UE_MACROS:
-                            return name
+                            args_text = self._get_macro_args_text(child)
+                            return (name, args_text)
         return None
+
+    def _get_macro_args_text(self, call_node) -> str:
+        """Extract the argument text from a call_expression node.
+        Returns the content between the parentheses, or empty string."""
+        for child in call_node.children:
+            if child.type == "argument_list":
+                # Get text between ( and )
+                text = child.text.decode() if child.text else ""
+                # Strip the surrounding parentheses
+                if text.startswith("(") and text.endswith(")"):
+                    return text[1:-1].strip()
+                return text
+        return ""
 
     # ------------------------------------------------------------------
     # Class / struct / enum extraction
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _specifiers_from_macro(ue_macro: tuple[str, str] | None) -> tuple[list[str], str | None]:
+        """Extract replication specifiers from a ue_macro tuple.
+        Returns (ue_specifiers, rep_notify_func)."""
+        if ue_macro is None:
+            return [], None
+        macro_name, args_text = ue_macro
+        return _parse_ue_specifiers(macro_name, args_text)
+
     def _extract_class_or_struct_or_enum(
-        self, node, source_lines: list[str], result: ParseResult, ue_macro: str | None = None
+        self, node, source_lines: list[str], result: ParseResult, ue_macro: tuple[str, str] | None = None
     ) -> None:
         """Extract a class_specifier, struct_specifier, or enum_specifier."""
         kind_map = {
@@ -206,6 +268,7 @@ class CppParser:
         docstring = self._get_docstring_above(node, source_lines, ue_macro_above=ue_macro is not None)
         signature = node.text.decode().split("{")[0].strip() if node.text else ""
 
+        ue_specs, rep_func = self._specifiers_from_macro(ue_macro)
         symbol = ParsedSymbol(
             name=name,
             kind=kind,
@@ -215,6 +278,8 @@ class CppParser:
             docstring=docstring,
             is_ue_macro=ue_macro is not None,
             base_classes=base_classes,
+            ue_specifiers=ue_specs,
+            rep_notify_func=rep_func,
         )
         result.symbols.append(symbol)
 
@@ -303,19 +368,47 @@ class CppParser:
             )
             i += 1
 
-    def _try_get_ue_macro_field(self, node) -> str | None:
+    def _try_get_ue_macro_field(self, node) -> tuple[str, str] | None:
         """Detect UPROPERTY/UFUNCTION etc. in a field_declaration_list context.
-        These appear as field_declaration with type_identifier=UPROPERTY."""
+        These appear as field_declaration with type_identifier=UPROPERTY.
+        Returns (macro_name, args_text) or None."""
         if node.type == "field_declaration":
             for child in node.children:
                 if child.type == "type_identifier" and child.text.decode() in UE_MACROS:
-                    return child.text.decode()
+                    macro_name = child.text.decode()
+                    # Extract args from the node text (e.g. "UPROPERTY(Replicated)\nfloat Health")
+                    # The args are between the first ( and matching )
+                    text = node.text.decode() if node.text else ""
+                    args_text = self._extract_args_from_text(text, macro_name)
+                    return (macro_name, args_text)
         # Also check expression_statement (sometimes macros appear this way)
         return self._try_get_ue_macro(node)
 
+    def _extract_args_from_text(self, text: str, macro_name: str) -> str:
+        """Extract macro arguments from raw text like 'UPROPERTY(Replicated)'.
+        Returns the content between the parentheses."""
+        idx = text.find(macro_name)
+        if idx < 0:
+            return ""
+        after = text[idx + len(macro_name):]
+        # Find opening paren
+        paren_start = after.find("(")
+        if paren_start < 0:
+            return ""
+        # Find matching closing paren
+        depth = 0
+        for i, ch in enumerate(after[paren_start:]):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return after[paren_start + 1:paren_start + i].strip()
+        return ""
+
     def _extract_field_or_func_decl(
         self, node, source_lines: list[str], result: ParseResult,
-        parent_class: str = "", access: str = "", ue_macro: str | None = None
+        parent_class: str = "", access: str = "", ue_macro: tuple[str, str] | None = None
     ) -> None:
         """Extract a single field_declaration as either a variable or function declaration."""
         if node.type not in ("field_declaration", "declaration", "function_definition"):
@@ -337,6 +430,7 @@ class CppParser:
 
         # Determine if this is a function or variable
         has_func_declarator = any(c.type == "function_declarator" for c in node.children)
+        ue_specs, rep_func = self._specifiers_from_macro(ue_macro)
 
         if has_func_declarator:
             name = self._get_func_declarator_name(node)
@@ -354,6 +448,8 @@ class CppParser:
                 access=access,
                 is_ue_macro=ue_macro is not None,
                 parent_class=parent_class,
+                ue_specifiers=ue_specs,
+                rep_notify_func=rep_func,
             ))
         else:
             name = self._get_field_name(node)
@@ -371,6 +467,8 @@ class CppParser:
                 access=access,
                 is_ue_macro=ue_macro is not None,
                 parent_class=parent_class,
+                ue_specifiers=ue_specs,
+                rep_notify_func=rep_func,
             ))
 
     def _get_func_declarator_name(self, node) -> str | None:
@@ -430,7 +528,7 @@ class CppParser:
     _BASE_CLASS_RE = re.compile(r'(?:public|protected|private)\s+(\w+)')
 
     def _extract_class_from_error_node(
-        self, node, source_lines: list[str], result: ParseResult, ue_macro: str | None = None
+        self, node, source_lines: list[str], result: ParseResult, ue_macro: tuple[str, str] | None = None
     ) -> None:
         """Extract a class/struct from an ERROR node using regex fallback.
 
@@ -451,6 +549,7 @@ class CppParser:
 
         docstring = self._get_docstring_above(node, source_lines, ue_macro_above=ue_macro is not None)
         sig_text = text.split("{")[0].strip() if text else ""
+        ue_specs, rep_func = self._specifiers_from_macro(ue_macro)
 
         symbol = ParsedSymbol(
             name=name,
@@ -461,6 +560,8 @@ class CppParser:
             docstring=docstring,
             is_ue_macro=ue_macro is not None,
             base_classes=base_classes,
+            ue_specifiers=ue_specs,
+            rep_notify_func=rep_func,
         )
         result.symbols.append(symbol)
 
@@ -527,7 +628,7 @@ class CppParser:
         end_line = node.end_point[0]
 
         current_access = default_access
-        pending_ue_macro: str | None = None
+        pending_ue_macro: tuple[str, str] | None = None
         # Track which lines we already handled (UE macro lines)
         skip_next = False
 
@@ -555,7 +656,8 @@ class CppParser:
             is_ue_macro_line = False
             for macro in UE_MACROS:
                 if stripped.startswith(macro + "(") or stripped == macro:
-                    pending_ue_macro = macro
+                    args_text = self._extract_args_from_text(stripped, macro)
+                    pending_ue_macro = (macro, args_text)
                     is_ue_macro_line = True
                     break
             if is_ue_macro_line:
@@ -571,6 +673,7 @@ class CppParser:
                     pending_ue_macro = None
                     continue
                 sig = stripped.rstrip(";").strip()
+                ue_specs, rep_func = self._specifiers_from_macro(pending_ue_macro)
                 result.symbols.append(ParsedSymbol(
                     name=func_name,
                     kind="function",
@@ -580,6 +683,8 @@ class CppParser:
                     access=current_access,
                     is_ue_macro=pending_ue_macro is not None,
                     parent_class=parent_class,
+                    ue_specifiers=ue_specs,
+                    rep_notify_func=rep_func,
                 ))
                 pending_ue_macro = None
                 continue
@@ -596,6 +701,7 @@ class CppParser:
                 if var_type in ("public", "protected", "private"):
                     continue
                 sig = stripped.rstrip(";").strip()
+                ue_specs, rep_func = self._specifiers_from_macro(pending_ue_macro)
                 result.symbols.append(ParsedSymbol(
                     name=var_name,
                     kind="variable",
@@ -605,6 +711,8 @@ class CppParser:
                     access=current_access,
                     is_ue_macro=pending_ue_macro is not None,
                     parent_class=parent_class,
+                    ue_specifiers=ue_specs,
+                    rep_notify_func=rep_func,
                 ))
                 pending_ue_macro = None
                 continue
@@ -616,7 +724,7 @@ class CppParser:
     # ------------------------------------------------------------------
 
     def _extract_misparse_class_or_function(
-        self, node, source_lines: list[str], result: ParseResult, ue_macro: str | None = None
+        self, node, source_lines: list[str], result: ParseResult, ue_macro: tuple[str, str] | None = None
     ) -> None:
         """Handle a function_definition that may actually be a misparsed class
         (due to ENGINE_API or similar export macros) or a real function."""
@@ -630,7 +738,7 @@ class CppParser:
             self._extract_function_definition(node, source_lines, result, ue_macro=ue_macro)
 
     def _extract_misparsed_class(
-        self, node, source_lines: list[str], result: ParseResult, ue_macro: str | None = None
+        self, node, source_lines: list[str], result: ParseResult, ue_macro: tuple[str, str] | None = None
     ) -> None:
         """Extract a class that tree-sitter misparsed as function_definition
         due to ENGINE_API macro. Structure:
@@ -664,6 +772,7 @@ class CppParser:
 
         # Build signature from first line(s) up to {
         sig_text = node.text.decode().split("{")[0].strip() if node.text else ""
+        ue_specs, rep_func = self._specifiers_from_macro(ue_macro)
 
         symbol = ParsedSymbol(
             name=name,
@@ -674,6 +783,8 @@ class CppParser:
             docstring=docstring,
             is_ue_macro=ue_macro is not None,
             base_classes=base_classes,
+            ue_specifiers=ue_specs,
+            rep_notify_func=rep_func,
         )
         result.symbols.append(symbol)
 
@@ -759,7 +870,7 @@ class CppParser:
     def _extract_from_labeled(
         self, node, source_lines: list[str], result: ParseResult,
         parent_class: str, current_access: str
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, tuple[str, str] | None]:
         """Extract members from a labeled_statement (access: declarations...).
         Returns (new_access, pending_ue_macro). pending_ue_macro is set when
         the last child was a UE macro with no following declaration inside
@@ -774,7 +885,7 @@ class CppParser:
         # Process children of the labeled_statement (the declarations within this access region)
         children = list(node.children)
         i = 0
-        pending_macro: str | None = None
+        pending_macro: tuple[str, str] | None = None
         while i < len(children):
             child = children[i]
             if child.type in ("statement_identifier", ":"):
@@ -821,7 +932,7 @@ class CppParser:
 
     def _extract_compound_member(
         self, node, source_lines: list[str], result: ParseResult,
-        parent_class: str = "", access: str = "", ue_macro: str | None = None
+        parent_class: str = "", access: str = "", ue_macro: tuple[str, str] | None = None
     ) -> None:
         """Extract a member from inside a compound_statement (misparsed class body).
         These are typically declaration or expression_statement nodes."""
@@ -833,6 +944,8 @@ class CppParser:
         # Skip GENERATED_BODY
         if "GENERATED_BODY" in text:
             return
+
+        ue_specs, rep_func = self._specifiers_from_macro(ue_macro)
 
         if node.type == "declaration":
             has_func_declarator = any(c.type == "function_declarator" for c in node.children)
@@ -851,6 +964,8 @@ class CppParser:
                         access=access,
                         is_ue_macro=ue_macro is not None,
                         parent_class=parent_class,
+                        ue_specifiers=ue_specs,
+                        rep_notify_func=rep_func,
                     ))
             else:
                 name = self._get_field_name(node)
@@ -867,6 +982,8 @@ class CppParser:
                         access=access,
                         is_ue_macro=ue_macro is not None,
                         parent_class=parent_class,
+                        ue_specifiers=ue_specs,
+                        rep_notify_func=rep_func,
                     ))
         elif node.type == "expression_statement":
             # Could be a constructor call like ASampleActor();
@@ -888,6 +1005,8 @@ class CppParser:
                                 access=access,
                                 is_ue_macro=ue_macro is not None,
                                 parent_class=parent_class,
+                                ue_specifiers=ue_specs,
+                                rep_notify_func=rep_func,
                             ))
 
     # ------------------------------------------------------------------
@@ -895,7 +1014,7 @@ class CppParser:
     # ------------------------------------------------------------------
 
     def _extract_function_definition(
-        self, node, source_lines: list[str], result: ParseResult, ue_macro: str | None = None
+        self, node, source_lines: list[str], result: ParseResult, ue_macro: tuple[str, str] | None = None
     ) -> None:
         """Extract a proper function_definition (in .cpp files or free functions)."""
         func_decl = None
@@ -935,6 +1054,7 @@ class CppParser:
             sig_parts.append(child.text.decode() if child.text else "")
         signature = " ".join(sig_parts).strip()
 
+        ue_specs, rep_func = self._specifiers_from_macro(ue_macro)
         result.symbols.append(ParsedSymbol(
             name=name,
             kind="function",
@@ -944,6 +1064,8 @@ class CppParser:
             docstring=docstring,
             is_ue_macro=ue_macro is not None,
             parent_class=parent_class,
+            ue_specifiers=ue_specs,
+            rep_notify_func=rep_func,
         ))
 
     # ------------------------------------------------------------------

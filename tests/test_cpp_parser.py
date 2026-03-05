@@ -98,3 +98,54 @@ class TestCppDefinitions:
     def test_qualified_names(self, cpp_result):
         func = _find(cpp_result, "UMeshDamageStamper::ApplyDamageStamp", "function")
         assert func is not None or _find(cpp_result, "ApplyDamageStamp", "function") is not None
+
+
+class TestReplicationExtraction:
+    def test_extracts_server_rpc(self):
+        parser = CppParser()
+        result = parser.parse_file(FIXTURES / "ReplicatedActor.h")
+        funcs = [s for s in result.symbols if s.name == "ServerFireWeapon"]
+        assert len(funcs) == 1
+        assert "Server" in funcs[0].ue_specifiers
+
+    def test_extracts_client_rpc(self):
+        parser = CppParser()
+        result = parser.parse_file(FIXTURES / "ReplicatedActor.h")
+        funcs = [s for s in result.symbols if s.name == "ClientPlayHitEffect"]
+        assert len(funcs) == 1
+        assert "Client" in funcs[0].ue_specifiers
+
+    def test_extracts_multicast_rpc(self):
+        parser = CppParser()
+        result = parser.parse_file(FIXTURES / "ReplicatedActor.h")
+        funcs = [s for s in result.symbols if s.name == "MulticastOnDeath"]
+        assert len(funcs) == 1
+        assert "NetMulticast" in funcs[0].ue_specifiers
+
+    def test_extracts_replicated_property(self):
+        parser = CppParser()
+        result = parser.parse_file(FIXTURES / "ReplicatedActor.h")
+        props = [s for s in result.symbols if s.name == "Health"]
+        assert len(props) == 1
+        assert "Replicated" in props[0].ue_specifiers
+
+    def test_extracts_replicated_using(self):
+        parser = CppParser()
+        result = parser.parse_file(FIXTURES / "ReplicatedActor.h")
+        props = [s for s in result.symbols if s.name == "Ammo"]
+        assert len(props) == 1
+        assert "ReplicatedUsing" in props[0].ue_specifiers
+        assert props[0].rep_notify_func == "OnRep_Ammo"
+
+    def test_reliable_specifier(self):
+        parser = CppParser()
+        result = parser.parse_file(FIXTURES / "ReplicatedActor.h")
+        funcs = [s for s in result.symbols if s.name == "ServerFireWeapon"]
+        assert "Reliable" in funcs[0].ue_specifiers
+
+    def test_no_specifiers_on_plain_ufunction(self):
+        parser = CppParser()
+        result = parser.parse_file(FIXTURES / "ReplicatedActor.h")
+        funcs = [s for s in result.symbols if s.name == "OnRep_Ammo"]
+        assert len(funcs) == 1
+        assert funcs[0].ue_specifiers == []
