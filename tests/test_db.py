@@ -66,7 +66,21 @@ class TestSchema:
     def test_schema_version(self, conn):
         row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         assert row is not None
-        assert row[0] == "1"
+        assert row[0] == "2"
+
+    def test_creates_v2_tables(self, conn):
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        v2_tables = {
+            "config_entries", "config_fts",
+            "asset_references", "data_tables",
+            "gameplay_tags", "tags_fts",
+            "module_dependencies",
+            "plugins", "plugin_modules", "plugin_dependencies",
+            "log_categories", "replication_entries", "pattern_tags",
+        }
+        assert v2_tables.issubset(tables), f"Missing tables: {v2_tables - tables}"
 
     def test_fts_tables_exist(self, conn):
         tables = {r[0] for r in conn.execute(
@@ -74,6 +88,50 @@ class TestSchema:
         ).fetchall()}
         assert "symbols_fts" in tables
         assert "source_fts" in tables
+
+
+# ─── Schema v2 tests ────────────────────────────────────────────────────
+
+class TestSchemaV2:
+    def test_creates_v2_tables(self, conn):
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        v2_tables = {
+            "config_entries", "config_fts",
+            "asset_references", "data_tables",
+            "gameplay_tags", "tags_fts",
+            "module_dependencies",
+            "plugins", "plugin_modules", "plugin_dependencies",
+            "log_categories", "replication_entries", "pattern_tags",
+        }
+        assert v2_tables.issubset(tables), f"Missing tables: {v2_tables - tables}"
+
+    def test_schema_version_is_2(self, conn):
+        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        assert row[0] == "2"
+
+    def test_config_fts_trigger_works(self, conn):
+        conn.execute(
+            "INSERT INTO config_entries (file_path, section, key, value, line) "
+            "VALUES ('/Config/DefaultEngine.ini', '/Script/Engine', 'bUseFixedFrameRate', 'True', 10)"
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM config_fts WHERE config_fts MATCH 'bUseFixedFrameRate'"
+        ).fetchone()
+        assert row is not None
+
+    def test_tags_fts_trigger_works(self, conn):
+        conn.execute(
+            "INSERT INTO gameplay_tags (tag, source_type, usage_kind, file_path, line) "
+            "VALUES ('Ability.Skill.Fireball', 'cpp', 'definition', '/test.cpp', 10)"
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM tags_fts WHERE tags_fts MATCH 'Fireball'"
+        ).fetchone()
+        assert row is not None
 
 
 # ─── Insert + query symbol tests ────────────────────────────────────────
