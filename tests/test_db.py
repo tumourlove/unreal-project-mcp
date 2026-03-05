@@ -358,3 +358,405 @@ class TestDuplicateModule:
         mod_id1 = queries.insert_module(conn, name="TestMod", path="/a", module_type="Runtime")
         mod_id2 = queries.insert_module(conn, name="TestMod", path="/a", module_type="Runtime")
         assert mod_id1 == mod_id2
+
+
+# ─── V2 Insert tests ────────────────────────────────────────────────────
+
+class TestV2Inserts:
+    def test_insert_config_entry(self, conn):
+        row_id = queries.insert_config_entry(
+            conn, file_path="/Config/DefaultEngine.ini",
+            section="/Script/Engine", key="bUseFixedFrameRate",
+            value="True", line=10,
+        )
+        assert row_id > 0
+        row = conn.execute("SELECT * FROM config_entries WHERE id = ?", (row_id,)).fetchone()
+        assert row is not None
+        assert dict(row)["key"] == "bUseFixedFrameRate"
+
+    def test_insert_asset_reference(self, populated):
+        conn = populated["conn"]
+        row_id = queries.insert_asset_reference(
+            conn, symbol_id=populated["parent_sym_id"],
+            asset_path="/Game/Meshes/SM_Chair.SM_Chair",
+            ref_type="soft_object", file_id=populated["file_id"], line=100,
+        )
+        assert row_id > 0
+        row = conn.execute("SELECT * FROM asset_references WHERE id = ?", (row_id,)).fetchone()
+        assert dict(row)["asset_path"] == "/Game/Meshes/SM_Chair.SM_Chair"
+
+    def test_insert_gameplay_tag(self, conn):
+        row_id = queries.insert_gameplay_tag(
+            conn, tag="Ability.Skill.Fireball",
+            source_type="cpp", usage_kind="definition",
+            file_path="/Source/MyGame/Abilities.cpp", line=42,
+        )
+        assert row_id > 0
+        row = conn.execute("SELECT * FROM gameplay_tags WHERE id = ?", (row_id,)).fetchone()
+        assert dict(row)["tag"] == "Ability.Skill.Fireball"
+
+    def test_insert_gameplay_tag_with_symbol(self, populated):
+        conn = populated["conn"]
+        row_id = queries.insert_gameplay_tag(
+            conn, tag="Combat.Damage.Fire",
+            source_type="cpp", usage_kind="usage",
+            symbol_id=populated["child_sym_id"],
+        )
+        assert row_id > 0
+
+    def test_insert_module_dependency(self, populated):
+        conn = populated["conn"]
+        queries.insert_module_dependency(
+            conn, module_id=populated["module_id"],
+            dependency_name="Engine", dep_type="public",
+        )
+        row = conn.execute(
+            "SELECT * FROM module_dependencies WHERE module_id = ? AND dependency_name = ?",
+            (populated["module_id"], "Engine"),
+        ).fetchone()
+        assert row is not None
+        assert dict(row)["dep_type"] == "public"
+
+    def test_insert_module_dependency_ignore_duplicate(self, populated):
+        conn = populated["conn"]
+        queries.insert_module_dependency(
+            conn, module_id=populated["module_id"],
+            dependency_name="Engine", dep_type="public",
+        )
+        # Should not raise
+        queries.insert_module_dependency(
+            conn, module_id=populated["module_id"],
+            dependency_name="Engine", dep_type="public",
+        )
+
+    def test_insert_plugin(self, conn):
+        plugin_id = queries.insert_plugin(
+            conn, name="MyPlugin", friendly_name="My Plugin",
+            description="A test plugin", category="Gameplay",
+            version="1.0", can_contain_content=True, is_beta=False,
+            file_path="/Plugins/MyPlugin/MyPlugin.uplugin",
+        )
+        assert plugin_id > 0
+        row = conn.execute("SELECT * FROM plugins WHERE id = ?", (plugin_id,)).fetchone()
+        assert dict(row)["name"] == "MyPlugin"
+
+    def test_insert_plugin_duplicate_returns_existing(self, conn):
+        id1 = queries.insert_plugin(
+            conn, name="MyPlugin",
+            file_path="/Plugins/MyPlugin/MyPlugin.uplugin",
+        )
+        id2 = queries.insert_plugin(
+            conn, name="MyPlugin",
+            file_path="/Plugins/MyPlugin/MyPlugin.uplugin",
+        )
+        assert id1 == id2
+
+    def test_insert_plugin_module(self, conn):
+        plugin_id = queries.insert_plugin(
+            conn, name="TestPlugin",
+            file_path="/Plugins/TestPlugin/TestPlugin.uplugin",
+        )
+        queries.insert_plugin_module(
+            conn, plugin_id=plugin_id, module_name="TestPluginModule",
+            module_type="Runtime", loading_phase="Default",
+        )
+        row = conn.execute(
+            "SELECT * FROM plugin_modules WHERE plugin_id = ?", (plugin_id,)
+        ).fetchone()
+        assert dict(row)["module_name"] == "TestPluginModule"
+
+    def test_insert_plugin_dependency(self, conn):
+        plugin_id = queries.insert_plugin(
+            conn, name="DepPlugin",
+            file_path="/Plugins/DepPlugin/DepPlugin.uplugin",
+        )
+        queries.insert_plugin_dependency(conn, plugin_id=plugin_id, depends_on="OnlineSubsystem")
+        row = conn.execute(
+            "SELECT * FROM plugin_dependencies WHERE plugin_id = ?", (plugin_id,)
+        ).fetchone()
+        assert dict(row)["depends_on"] == "OnlineSubsystem"
+
+    def test_insert_log_category(self, populated):
+        conn = populated["conn"]
+        queries.insert_log_category(
+            conn, name="LogMyGame", file_id=populated["file_id"],
+            line=5, verbosity="Log",
+        )
+        row = conn.execute(
+            "SELECT * FROM log_categories WHERE name = ?", ("LogMyGame",)
+        ).fetchone()
+        assert row is not None
+        assert dict(row)["verbosity"] == "Log"
+
+    def test_insert_log_category_ignore_duplicate(self, populated):
+        conn = populated["conn"]
+        queries.insert_log_category(conn, name="LogDup", file_id=populated["file_id"], line=1)
+        # Should not raise
+        queries.insert_log_category(conn, name="LogDup", file_id=populated["file_id"], line=2)
+
+    def test_insert_replication_entry(self, populated):
+        conn = populated["conn"]
+        queries.insert_replication_entry(
+            conn, symbol_id=populated["child_sym_id"],
+            rep_type="replicated", condition="COND_OwnerOnly",
+            callback="OnRep_Location",
+        )
+        row = conn.execute(
+            "SELECT * FROM replication_entries WHERE symbol_id = ?",
+            (populated["child_sym_id"],),
+        ).fetchone()
+        assert dict(row)["rep_type"] == "replicated"
+        assert dict(row)["condition"] == "COND_OwnerOnly"
+
+    def test_insert_pattern_tag(self, populated):
+        conn = populated["conn"]
+        queries.insert_pattern_tag(
+            conn, symbol_id=populated["parent_sym_id"],
+            tag_kind="singleton", metadata='{"scope": "game"}',
+        )
+        row = conn.execute(
+            "SELECT * FROM pattern_tags WHERE symbol_id = ?",
+            (populated["parent_sym_id"],),
+        ).fetchone()
+        assert dict(row)["tag_kind"] == "singleton"
+
+    def test_insert_data_table(self, populated):
+        conn = populated["conn"]
+        queries.insert_data_table(
+            conn, struct_symbol_id=populated["parent_sym_id"],
+            table_path="/Game/Data/DT_Weapons",
+            table_name="DT_Weapons",
+        )
+        row = conn.execute(
+            "SELECT * FROM data_tables WHERE struct_symbol_id = ?",
+            (populated["parent_sym_id"],),
+        ).fetchone()
+        assert dict(row)["table_name"] == "DT_Weapons"
+
+
+# ─── V2 Query tests ─────────────────────────────────────────────────────
+
+class TestV2Queries:
+    def test_search_config_fts(self, conn):
+        queries.insert_config_entry(
+            conn, file_path="/Config/DefaultEngine.ini",
+            section="/Script/Engine", key="bUseFixedFrameRate",
+            value="True", line=10,
+        )
+        conn.commit()
+        results = queries.search_config_fts(conn, "bUseFixedFrameRate")
+        assert len(results) >= 1
+        assert results[0]["key"] == "bUseFixedFrameRate"
+
+    def test_get_config_by_key(self, conn):
+        queries.insert_config_entry(
+            conn, file_path="/Config/DefaultEngine.ini",
+            section="/Script/Engine", key="MaxFPS", value="60", line=20,
+        )
+        queries.insert_config_entry(
+            conn, file_path="/Config/DefaultGame.ini",
+            section="/Script/Game", key="MaxFPS", value="120", line=5,
+        )
+        # Without section filter
+        results = queries.get_config_by_key(conn, "MaxFPS")
+        assert len(results) == 2
+        # With section filter
+        results = queries.get_config_by_key(conn, "MaxFPS", section="/Script/Engine")
+        assert len(results) == 1
+        assert results[0]["value"] == "60"
+
+    def test_get_asset_references_by_path(self, populated):
+        conn = populated["conn"]
+        queries.insert_asset_reference(
+            conn, symbol_id=populated["parent_sym_id"],
+            asset_path="/Game/Meshes/SM_Chair.SM_Chair",
+            ref_type="soft_object", file_id=populated["file_id"], line=100,
+        )
+        results = queries.get_asset_references_by_path(conn, "SM_Chair")
+        assert len(results) >= 1
+        assert "SM_Chair" in results[0]["asset_path"]
+
+    def test_get_asset_references_by_symbol(self, populated):
+        conn = populated["conn"]
+        queries.insert_asset_reference(
+            conn, symbol_id=populated["parent_sym_id"],
+            asset_path="/Game/Meshes/SM_Table.SM_Table",
+            ref_type="hard_object", file_id=populated["file_id"], line=101,
+        )
+        results = queries.get_asset_references_by_symbol(conn, populated["parent_sym_id"])
+        assert len(results) >= 1
+        assert results[0]["asset_path"] == "/Game/Meshes/SM_Table.SM_Table"
+
+    def test_search_gameplay_tags_fts(self, conn):
+        queries.insert_gameplay_tag(
+            conn, tag="Ability.Skill.Fireball",
+            source_type="cpp", usage_kind="definition",
+            file_path="/Source/test.cpp", line=10,
+        )
+        conn.commit()
+        results = queries.search_gameplay_tags_fts(conn, "Fireball")
+        assert len(results) >= 1
+        assert results[0]["tag"] == "Ability.Skill.Fireball"
+
+    def test_search_gameplay_tags_fts_with_usage_kind(self, conn):
+        queries.insert_gameplay_tag(
+            conn, tag="Combat.Damage.Fire",
+            source_type="cpp", usage_kind="definition",
+            file_path="/Source/a.cpp", line=1,
+        )
+        queries.insert_gameplay_tag(
+            conn, tag="Combat.Damage.Ice",
+            source_type="cpp", usage_kind="usage",
+            file_path="/Source/b.cpp", line=2,
+        )
+        conn.commit()
+        results = queries.search_gameplay_tags_fts(conn, "Combat", usage_kind="definition")
+        tags = [r["tag"] for r in results]
+        assert "Combat.Damage.Fire" in tags
+        assert "Combat.Damage.Ice" not in tags
+
+    def test_get_module_dependencies(self, populated):
+        conn = populated["conn"]
+        queries.insert_module_dependency(
+            conn, module_id=populated["module_id"],
+            dependency_name="Engine", dep_type="public",
+        )
+        queries.insert_module_dependency(
+            conn, module_id=populated["module_id"],
+            dependency_name="Slate", dep_type="private",
+        )
+        results = queries.get_module_dependencies(conn, populated["module_id"])
+        assert len(results) == 2
+
+        results = queries.get_module_dependencies(conn, populated["module_id"], dep_type="public")
+        assert len(results) == 1
+        assert results[0]["dependency_name"] == "Engine"
+
+    def test_get_module_dependents(self, populated):
+        conn = populated["conn"]
+        queries.insert_module_dependency(
+            conn, module_id=populated["module_id"],
+            dependency_name="Engine", dep_type="public",
+        )
+        results = queries.get_module_dependents(conn, "Engine")
+        assert len(results) >= 1
+        assert results[0]["name"] == "CoreModule"
+
+    def test_get_plugin_by_name(self, conn):
+        queries.insert_plugin(
+            conn, name="MyPlugin", friendly_name="My Plugin",
+            file_path="/Plugins/MyPlugin/MyPlugin.uplugin",
+        )
+        result = queries.get_plugin_by_name(conn, "MyPlugin")
+        assert result is not None
+        assert result["friendly_name"] == "My Plugin"
+
+    def test_get_plugin_by_name_not_found(self, conn):
+        result = queries.get_plugin_by_name(conn, "NonExistent")
+        assert result is None
+
+    def test_get_plugin_modules(self, conn):
+        plugin_id = queries.insert_plugin(
+            conn, name="TestPlugin",
+            file_path="/Plugins/TestPlugin/TestPlugin.uplugin",
+        )
+        queries.insert_plugin_module(
+            conn, plugin_id=plugin_id, module_name="TestMod",
+            module_type="Runtime", loading_phase="Default",
+        )
+        results = queries.get_plugin_modules(conn, plugin_id)
+        assert len(results) == 1
+        assert results[0]["module_name"] == "TestMod"
+
+    def test_get_plugin_dependencies(self, conn):
+        plugin_id = queries.insert_plugin(
+            conn, name="DepPlugin",
+            file_path="/Plugins/DepPlugin/DepPlugin.uplugin",
+        )
+        queries.insert_plugin_dependency(conn, plugin_id=plugin_id, depends_on="OnlineSubsystem")
+        queries.insert_plugin_dependency(conn, plugin_id=plugin_id, depends_on="Niagara")
+        results = queries.get_plugin_dependencies(conn, plugin_id)
+        assert len(results) == 2
+        dep_names = [r["depends_on"] for r in results]
+        assert "OnlineSubsystem" in dep_names
+
+    def test_get_log_category(self, populated):
+        conn = populated["conn"]
+        queries.insert_log_category(
+            conn, name="LogMyGame", file_id=populated["file_id"],
+            line=5, verbosity="Log",
+        )
+        result = queries.get_log_category(conn, "LogMyGame")
+        assert result is not None
+        assert result["verbosity"] == "Log"
+        assert "path" in result  # JOINs files for path
+
+    def test_get_log_category_not_found(self, conn):
+        result = queries.get_log_category(conn, "LogNonExistent")
+        assert result is None
+
+    def test_get_replication_entries(self, populated):
+        conn = populated["conn"]
+        queries.insert_replication_entry(
+            conn, symbol_id=populated["child_sym_id"],
+            rep_type="replicated", condition="COND_OwnerOnly",
+        )
+        results = queries.get_replication_entries(conn)
+        assert len(results) >= 1
+        assert results[0]["rep_type"] == "replicated"
+
+    def test_get_replication_entries_by_class(self, populated):
+        conn = populated["conn"]
+        queries.insert_replication_entry(
+            conn, symbol_id=populated["child_sym_id"],
+            rep_type="replicated", condition="COND_OwnerOnly",
+        )
+        # child_sym's parent_symbol_id is parent_sym_id (AActor)
+        results = queries.get_replication_entries(conn, class_name="AActor")
+        assert len(results) >= 1
+        assert results[0]["condition"] == "COND_OwnerOnly"
+
+        # Non-matching class
+        results = queries.get_replication_entries(conn, class_name="APawn")
+        assert len(results) == 0
+
+    def test_get_pattern_tags(self, populated):
+        conn = populated["conn"]
+        queries.insert_pattern_tag(
+            conn, symbol_id=populated["parent_sym_id"],
+            tag_kind="singleton", metadata='{"scope": "game"}',
+        )
+        queries.insert_pattern_tag(
+            conn, symbol_id=populated["child_sym_id"],
+            tag_kind="factory",
+        )
+        results = queries.get_pattern_tags(conn, kind="singleton")
+        assert len(results) == 1
+        assert results[0]["tag_kind"] == "singleton"
+
+    def test_get_pattern_tags_with_query(self, populated):
+        conn = populated["conn"]
+        queries.insert_pattern_tag(
+            conn, symbol_id=populated["parent_sym_id"],
+            tag_kind="singleton",
+        )
+        results = queries.get_pattern_tags(conn, query="Actor")
+        assert len(results) >= 1
+
+    def test_get_data_tables_by_struct(self, populated):
+        conn = populated["conn"]
+        queries.insert_data_table(
+            conn, struct_symbol_id=populated["parent_sym_id"],
+            table_path="/Game/Data/DT_Weapons",
+            table_name="DT_Weapons",
+        )
+        queries.insert_data_table(
+            conn, struct_symbol_id=populated["parent_sym_id"],
+            table_path="/Game/Data/DT_Armor",
+            table_name="DT_Armor",
+        )
+        results = queries.get_data_tables_by_struct(conn, populated["parent_sym_id"])
+        assert len(results) == 2
+        names = [r["table_name"] for r in results]
+        assert "DT_Weapons" in names
+        assert "DT_Armor" in names
