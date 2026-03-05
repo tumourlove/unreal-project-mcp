@@ -21,13 +21,23 @@ from unreal_project_mcp.db.queries import (
     get_file_by_path,
     get_inheritance_children,
     get_inheritance_parents,
+    get_log_category,
+    get_module_by_name,
+    get_module_dependencies as get_module_dependencies_query,
+    get_module_dependents,
     get_module_stats,
+    get_pattern_tags,
+    get_plugin_by_name,
+    get_plugin_dependencies,
+    get_plugin_modules,
     get_references_from,
     get_references_to,
+    get_replication_entries,
     get_source_chunks,
     get_symbols_by_name,
     get_symbols_in_module,
     search_config_fts,
+    search_gameplay_tags_fts,
     search_source_fts,
     search_source_fts_filtered,
     search_symbols_fts,
@@ -748,6 +758,191 @@ def find_data_table_schema(name: str) -> str:
     source = _read_file_lines(filepath, sym["line_start"], sym["line_end"])
     lines.append(f"\n--- Source ({sym['line_start']}-{sym['line_end']}) ---")
     lines.append(source)
+
+    return "\n".join(lines)
+
+
+# ── Tool 12: search_gameplay_tags ─────────────────────────────────────────
+
+@mcp.tool()
+def search_gameplay_tags(query: str, usage_kind: str = "") -> str:
+    """Search gameplay tag definitions, requests, and checks across the project."""
+    conn = _get_conn()
+    results = search_gameplay_tags_fts(conn, query, usage_kind=usage_kind or None)
+    if not results:
+        return f"No gameplay tags found for '{query}'."
+    lines = []
+    for r in results:
+        kind_tag = f"[{r['usage_kind']}]" if r.get('usage_kind') else ""
+        src = r.get('source_type', '?')
+        loc = ""
+        if r.get('file_path'):
+            loc = f" — {_short_path(r['file_path'])}:{r.get('line', '?')}"
+        lines.append(f"{kind_tag} {r['tag']} (from {src}){loc}")
+    return "\n".join(lines)
+
+
+# ── Tool 13: get_module_dependencies ─────────────────────────────────────
+
+@mcp.tool()
+def get_module_dependencies(module_name: str, direction: str = "both") -> str:
+    """Show Build.cs dependency graph for a module. direction: 'dependencies', 'dependents', or 'both'."""
+    conn = _get_conn()
+    mod = get_module_by_name(conn, module_name)
+    if mod is None:
+        return f"No module found matching '{module_name}'."
+
+    lines = [f"Module: {mod['name']}"]
+
+    if direction in ("dependencies", "both"):
+        deps = get_module_dependencies_query(conn, mod["id"])
+        lines.append(f"\nDependencies ({len(deps)}):")
+        if not deps:
+            lines.append("  (none)")
+        for d in deps:
+            lines.append(f"  [{d['dep_type']}] {d['dependency_name']}")
+
+    if direction in ("dependents", "both"):
+        dependents = get_module_dependents(conn, module_name)
+        lines.append(f"\nDependents ({len(dependents)}):")
+        if not dependents:
+            lines.append("  (none)")
+        for d in dependents:
+            lines.append(f"  [{d['dep_type']}] {d['name']}")
+
+    return "\n".join(lines)
+
+
+# ── Tool 14: get_plugin_info ─────────────────────────────────────────────
+
+@mcp.tool()
+def get_plugin_info(plugin_name: str) -> str:
+    """Show plugin metadata, modules, and dependencies."""
+    conn = _get_conn()
+    plugin = get_plugin_by_name(conn, plugin_name)
+    if plugin is None:
+        return f"No plugin found matching '{plugin_name}'."
+
+    lines = [
+        f"Plugin: {plugin['name']}",
+        f"Friendly Name: {plugin.get('friendly_name') or 'N/A'}",
+        f"Description: {plugin.get('description') or 'N/A'}",
+        f"Category: {plugin.get('category') or 'N/A'}",
+        f"Version: {plugin.get('version') or 'N/A'}",
+    ]
+
+    modules = get_plugin_modules(conn, plugin["id"])
+    if modules:
+        lines.append(f"\nModules ({len(modules)}):")
+        for m in modules:
+            phase = f", {m['loading_phase']}" if m.get('loading_phase') else ""
+            lines.append(f"  {m['module_name']} [{m.get('module_type', '?')}{phase}]")
+
+    deps = get_plugin_dependencies(conn, plugin["id"])
+    if deps:
+        lines.append(f"\nPlugin Dependencies ({len(deps)}):")
+        for d in deps:
+            lines.append(f"  {d['depends_on']}")
+
+    return "\n".join(lines)
+
+
+# ── Tool 15: find_log_sites ──────────────────────────────────────────────
+
+@mcp.tool()
+def find_log_sites(category: str, limit: int = 50) -> str:
+    """Find where a log category is declared and all UE_LOG usage sites."""
+    conn = _get_conn()
+
+    lines = []
+    # Declaration
+    cat = get_log_category(conn, category)
+    if cat:
+        loc = ""
+        if cat.get("path"):
+            loc = f" — {_short_path(cat['path'])}:{cat.get('line', '?')}"
+        lines.append(f"Declaration: {category} (verbosity: {cat.get('verbosity', '?')}){loc}")
+    else:
+        lines.append(f"No declaration found for '{category}' in indexed source.")
+
+    # Usage sites via source_fts
+    search_term = f"UE_LOG {category}"
+    results = search_source_fts(conn, search_term, limit=limit)
+    usage_lines = []
+    for r in results:
+        text = r.get("text", "")
+        if category in text and "UE_LOG" in text:
+            fid = r["file_id"]
+            filepath = _get_file_path(conn, fid)
+            line_num = r.get("line_number", "?")
+            snippet = text.strip()[:100]
+            usage_lines.append(f"  {_short_path(filepath)}:{line_num}")
+            usage_lines.append(f"    {snippet}")
+
+    lines.append(f"\nUsage sites ({len(usage_lines) // 2}):")
+    if usage_lines:
+        lines.extend(usage_lines)
+    else:
+        lines.append("  (none found in indexed source)")
+
+    return "\n".join(lines)
+
+
+# ── Tool 16: get_replication_map ─────────────────────────────────────────
+
+@mcp.tool()
+def get_replication_map(class_name: str = "") -> str:
+    """Show Server/Client/NetMulticast RPCs and replicated properties for a class (or all classes)."""
+    conn = _get_conn()
+    results = get_replication_entries(conn, class_name=class_name or None)
+    if not results:
+        if class_name:
+            return f"No replication entries found for class '{class_name}'."
+        return "No replication entries found in the project."
+
+    # Group by parent class
+    by_class: dict[str, list] = {}
+    for r in results:
+        parent_name = r.get("qualified_name", "").split("::")[0] if "::" in r.get("qualified_name", "") else "Unknown"
+        by_class.setdefault(parent_name, []).append(r)
+
+    lines = []
+    for cls, entries in sorted(by_class.items()):
+        lines.append(f"\n{cls}:")
+        for e in entries:
+            sym_name = e.get("symbol_name", "?")
+            rep = e["rep_type"]
+            extra = ""
+            if e.get("callback"):
+                extra = f" → {e['callback']}"
+            if e.get("condition"):
+                extra += f" (COND: {e['condition']})"
+            path = e.get("path", "")
+            loc = f" — {_short_path(path)}" if path else ""
+            lines.append(f"  [{rep}] {sym_name}{extra}{loc}")
+
+    return "\n".join(lines)
+
+
+# ── Tool 17: search_project_tags ─────────────────────────────────────────
+
+@mcp.tool()
+def search_project_tags(kind: str = "", query: str = "") -> str:
+    """Search pattern tags: subsystems, anim_notify, console_command."""
+    conn = _get_conn()
+    results = get_pattern_tags(conn, kind=kind or None, query=query or None)
+    if not results:
+        return "No pattern tags found."
+
+    lines = []
+    for r in results:
+        sym_name = r.get("symbol_name", "?")
+        tag_kind = r["tag_kind"]
+        path = r.get("path", "")
+        loc = f" — {_short_path(path)}" if path else ""
+        meta = r.get("metadata", "")
+        meta_str = f" {meta}" if meta else ""
+        lines.append(f"[{tag_kind}] {sym_name}{meta_str}{loc}")
 
     return "\n".join(lines)
 
