@@ -161,6 +161,27 @@ unreal-project-mcp
 - Data table struct detection (FTableRowBase children)
 - Pattern classifications (subsystems, anim notifies, console commands)
 
+## Adding to Your Project's CLAUDE.md
+
+```markdown
+## Project Intelligence (unreal-project MCP)
+
+Use `unreal-project` MCP tools to search, read, and understand your project's C++ source,
+config files, module dependencies, gameplay tags, and replication topology.
+
+| Tool | When |
+|------|------|
+| `search_project` | Full-text search across project C++ source |
+| `read_project_source` | Read implementation of a class/function |
+| `find_project_callers` | What calls this function? |
+| `find_project_references` | Find all usage sites of a symbol |
+| `get_project_class_hierarchy` | Inheritance tree (ancestors/descendants) |
+| `get_config_values` | Look up config/INI values by key |
+| `get_module_dependencies` | Module dependency graph from Build.cs |
+| `search_gameplay_tags` | Search gameplay tag definitions and usage |
+| `get_replication_map` | Replicated properties and RPCs |
+```
+
 ## Development
 
 ```bash
